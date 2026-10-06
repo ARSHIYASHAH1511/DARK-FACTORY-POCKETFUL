@@ -1,0 +1,37 @@
+{
+  "kind": "layered",
+  "title": "DARK-FACTORY full-stack zero-sum ledger",
+  "layers": [
+    { "id": "ui", "title": "Command Center UI (React + Tailwind, Vite build -> dist/)", "items": [
+      { "id": "ui_topbar", "label": "Top bar", "detail": "Wordmark, 4 tabs, live entry counter, Run Test Suite" },
+      { "id": "ui_harness", "label": "Live Ledger Harness", "detail": "Mint, transfer, Blast 100 concurrent, zero-sum telemetry, time-travel slider, escrow state machine" },
+      { "id": "ui_band", "label": "BAND Room", "detail": "4 seat cards, mandate viewer, 8-milestone timeline" },
+      { "id": "ui_compliance", "label": "Invariants & Compliance", "detail": "Leaked-term scan, conservation proof, Docker matrix" },
+      { "id": "ui_artifacts", "label": "Repository Artifacts", "detail": "Syntax-highlighted explorer with copy" }
+    ] },
+    { "id": "api", "title": "Unified Express server (server.ts, port 3000)", "items": [
+      { "id": "api_router", "label": "Router /api/s1..s4 + /api/meta", "detail": "JSON contract, zod-style validation, uniform error envelope" },
+      { "id": "api_fuzz", "label": "Fuzzer endpoint", "detail": "POST /api/s2/fuzz: 100 workers vs acc_victim + 50 replays" },
+      { "id": "api_tests", "label": "Test runner endpoint", "detail": "POST /api/meta/tests spawns npx tsx stage-N/src/test.ts" },
+      { "id": "api_static", "label": "Static UI", "detail": "Serves dist/ with SPA fallback" }
+    ] },
+    { "id": "engines", "title": "Stage engines (TypeScript, isolated packages)", "items": [
+      { "id": "s1_core", "label": "Stage 1 Double-Entry Core", "detail": "In-memory append-only journal, fold balances" },
+      { "id": "s2_wal", "label": "Stage 2 Idempotency + WAL lock", "detail": "SHA-256 request hash, BEGIN IMMEDIATE, busy backoff" },
+      { "id": "s3_bitemporal", "label": "Stage 3 Bitemporal audit", "detail": "valid_at/system_at, as-of queries, inverse-entry reversal" },
+      { "id": "s4_escrow", "label": "Stage 4 FX + fees + escrow", "detail": "bps integer FX, 9999-FEE, HOLD-ESCROW 3-state machine" }
+    ] },
+    { "id": "store", "title": "Storage (node:sqlite, WAL, no native deps)", "items": [
+      { "id": "tbl_entries", "label": "entries (append-only)", "detail": "BIGINT signed amounts; UPDATE/DELETE blocked by triggers" },
+      { "id": "tbl_txns", "label": "transactions", "detail": "txn header, valid_at, system_at, reverses_txn_id UNIQUE; + idempotency(key PK, request_hash)" },
+      { "id": "tbl_holds", "label": "hold_events (append-only)", "detail": "Hold state derived from latest event" },
+      { "id": "tbl_accounts", "label": "accounts", "detail": "id, currency, kind. No balance column" }
+    ] }
+  ],
+  "flows": [
+    { "from": "ui", "to": "api", "label": "fetch JSON + 1s polling" },
+    { "from": "api", "to": "engines", "label": "in-process calls" },
+    { "from": "engines", "to": "store", "label": "SQL in BEGIN IMMEDIATE txns" },
+    { "from": "api_fuzz", "to": "s2_wal", "label": "worker_threads, 1 connection each" }
+  ]
+}

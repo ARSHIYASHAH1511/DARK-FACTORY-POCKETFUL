@@ -1,0 +1,12 @@
+{
+  "name": "dark-factory-stage-2",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=24" },
+  "scripts": {
+    "test": "node src/test.ts && node src/stress-test.ts",
+    "stress": "node src/stress-test.ts",
+    "start": "node src/server.ts"
+  }
+}
