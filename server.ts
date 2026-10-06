@@ -9,10 +9,12 @@ import express, { type NextFunction, type Request, type Response } from "express
 
 import { Ledger as Stage1Ledger, LedgerError as Stage1Error, SYSTEM_RESERVE } from "./stage-1/src/ledger.ts";
 import { HTTP_STATUS as STAGE1_STATUS } from "./stage-1/src/money.ts";
-import { SqliteLedger as Stage2Ledger, type Route as Route2 } from "./stage-2/src/ledger.ts";
+import { SqliteLedger as Stage2Ledger } from "./stage-2/src/ledger.ts";
 import { StressPool, runStress, type StressReport } from "./stage-2/src/stress-test.ts";
-import { SqliteLedger as Stage3Ledger, type AsOf, type Route as Route3 } from "./stage-3/src/ledger.ts";
-import { SqliteLedger as Stage4Ledger, quoteFx, type Route as Route4 } from "./stage-4/src/ledger.ts";
+import { SqliteLedger as Stage3Ledger, type AsOf } from "./stage-3/src/ledger.ts";
+import { SqliteLedger as Stage4Ledger } from "./stage-4/src/ledger.ts";
+import { HTTP_STATUS as LEDGER_STATUS } from "./stage-4/src/money.ts";
+import { feePolicyFromEnv, isOperator } from "./stage-4/src/operator.ts";
 
 const ROOT = dirname(fileURLToPath(import.meta.url));
 const DATA_DIR = resolve(process.env.DATA_DIR ?? join(ROOT, "data"));
@@ -28,7 +30,7 @@ mkdirSync(EVIDENCE_DIR, { recursive: true });
 const s1 = new Stage1Ledger();
 const s2 = new Stage2Ledger(join(DATA_DIR, "stage-2.db"));
 const s3 = new Stage3Ledger(join(DATA_DIR, "stage-3.db"));
-const s4 = new Stage4Ledger(join(DATA_DIR, "stage-4.db"));
+const s4 = new Stage4Ledger(join(DATA_DIR, "stage-4.db"), { fees: feePolicyFromEnv() });
 type DurableLedger = Stage2Ledger | Stage3Ledger | Stage4Ledger;
 const durable: Record<string, DurableLedger> = { s2, s3, s4 };
 
@@ -47,6 +49,9 @@ async function seed(): Promise<void> {
   await s4.submit("accounts", { account_id: "eur_carol", currency: "EUR" }, "seed-s4-acct-carol");
   await s4.submit("fund_pool", { currency: "EUR", amount: 1_000_000 }, "seed-s4-pool-eur");
   await s4.submit("fund_pool", { currency: "USD", amount: 1_000_000 }, "seed-s4-pool-usd");
+  // Operator rates are append-only history, so only seed a pair that has never been set.
+  if (!s4.fxRate("USD", "EUR")) await s4.setFxRate("USD", "EUR", 9_200);
+  if (!s4.fxRate("EUR", "USD")) await s4.setFxRate("EUR", "USD", 10_850);
 }
 
 // ---------------------------------------------------------------- helpers
@@ -199,24 +204,20 @@ for (const [name, ledger] of [["s3", s3], ["s4", s4]] as const) {
 
 // Stage 4 — FX, fees, escrow.
 app.post("/api/s4/fx", mutation(s4, "fx"));
-app.post("/api/s4/fund-pool", mutation(s4, "fund_pool"));
 app.post("/api/s4/holds", mutation(s4, "hold"));
 app.post("/api/s4/holds/:id/capture", mutation(s4, "capture", (req) => ({ ...(req.body ?? {}), hold_id: req.params.id })));
 app.post("/api/s4/holds/:id/release", mutation(s4, "release", (req) => ({ ...(req.body ?? {}), hold_id: req.params.id })));
 app.get("/api/s4/holds", (_req, res) => ok(res, s4.holds()));
 app.get("/api/s4/holds/:id", wrap((req, res) => ok(res, s4.hold(String(req.params.id)))));
-app.get("/api/s4/fx/quote", wrap((req, res) => {
-  const int = (name: string, fallback?: string) => {
-    const raw = (req.query[name] as string | undefined) ?? fallback;
-    if (raw === undefined || !/^(0|[1-9][0-9]{0,9})$/.test(raw)) throw new HttpError(400, "VALIDATION", `${name} must be a non-negative integer`);
-    return BigInt(raw);
-  };
-  const amount = int("amount");
-  const rate = int("rate_bps");
-  const fee = int("fee_bps", "0");
-  if (amount < 1n || rate < 1n || fee > 9_999n) throw new HttpError(400, "VALIDATION", "amount >= 1, rate_bps >= 1, fee_bps <= 9999");
-  ok(res, { amount, rate_bps: rate, fee_bps: fee, ...quoteFx(amount, rate, fee) });
-}));
+app.get("/api/s4/fx/quote", wrap((req, res) => ok(res, s4.quote(req.query.from_currency, req.query.to_currency, req.query.amount ?? ""))));
+app.get("/api/s4/fx/rates", (_req, res) => ok(res, s4.fxRates()));
+app.get("/api/s4/fees", (_req, res) => ok(res, s4.feePolicy));
+
+// Operator-only: disabled unless OPERATOR_TOKEN is set; send it as X-Operator-Token.
+const operator = (req: Request, res: Response, next: NextFunction) =>
+  isOperator(req.headers["x-operator-token"]) ? next() : fail(res, 403, "FORBIDDEN", "operator token required (set OPERATOR_TOKEN on the server)");
+app.post("/api/s4/admin/fx-rates", operator, wrap(async (req, res) => send(res, 201, { ok: true, data: await s4.setFxRate(req.body?.base, req.body?.quote, req.body?.rate_bps) })));
+app.post("/api/s4/admin/fund-pool", operator, mutation(s4, "fund_pool"));
 
 // ---------------------------------------------------------------- meta
 function readJsonFile<T>(path: string): T | null {
@@ -388,9 +389,8 @@ app.use((err: unknown, _req: Request, res: Response, _next: NextFunction) => {
   const e = err as { type?: string; status?: number; code?: string; message?: string };
   if (e?.type === "entity.too.large") return fail(res, 413, "PAYLOAD_TOO_LARGE", "body exceeds 64kb");
   if (e?.type === "entity.parse.failed") return fail(res, 400, "VALIDATION", "invalid JSON body");
-  if (e?.code && typeof e.code === "string" && /^[A-Z_]+$/.test(e.code) && e.message) {
-    const status = e.code.startsWith("UNKNOWN_") ? 404 : 400;
-    return fail(res, status, e.code, e.message);
+  if (typeof e?.code === "string" && e.code in LEDGER_STATUS && e.message) {
+    return fail(res, LEDGER_STATUS[e.code as keyof typeof LEDGER_STATUS], e.code, e.message);
   }
   console.error(err);
   fail(res, 500, "INTERNAL", "internal error");

@@ -549,6 +549,18 @@ export class SqliteLedger {
     return row ? { base: row.base, quote: row.quote, rate_bps: row.rate_bps, set_at: Number(row.set_at) } : null;
   }
 
+  // Read-only preview at the current server rate and fee policy.
+  quote(base: unknown, quote: unknown, amountInput: unknown) {
+    if (typeof base !== "string" || !CURRENCY.test(base) || typeof quote !== "string" || !CURRENCY.test(quote) || base === quote) {
+      throw new LedgerError("VALIDATION", "from_currency and to_currency must be two different 3-letter ISO codes");
+    }
+    const amount = parseAmount(amountInput);
+    const rate = this.fxRate(base, quote);
+    if (!rate) throw new LedgerError("NO_FX_RATE", `no FX rate configured for ${base}/${quote}`);
+    const feeBps = BigInt(this.feePolicy.fx_bps);
+    return { base, quote, amount, rate_bps: rate.rate_bps, rate_set_at: rate.set_at, fee_bps: feeBps, ...quoteFx(amount, rate.rate_bps, feeBps) };
+  }
+
   fxRates() {
     const pairs = this.db.prepare("SELECT DISTINCT base, quote FROM fx_rates ORDER BY base, quote").all() as { base: string; quote: string }[];
     return pairs.map((p) => this.fxRate(p.base, p.quote)!);

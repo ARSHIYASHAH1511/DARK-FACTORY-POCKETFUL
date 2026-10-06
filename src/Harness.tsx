@@ -118,7 +118,7 @@ function Operations({ stage, accounts, onDone }: { stage: Stage; accounts: Balan
   const [from, setFrom] = useState("");
   const [to, setTo] = useState("");
   const [amount, setAmount] = useState("1000");
-  const [feeBps, setFeeBps] = useState("0");
+  const fees = usePoll<{ transfer_bps: number; fx_bps: number }>(stage === "s4" ? "/api/s4/fees" : null, 0).data;
   const [validAt, setValidAt] = useState("");
   const [newId, setNewId] = useState("");
   const [currency, setCurrency] = useState("USD");
@@ -139,7 +139,7 @@ function Operations({ stage, accounts, onDone }: { stage: Stage; accounts: Balan
         ? await api.post(`/api/${stage}/accounts`, { account_id: newId, ...(stage === "s4" ? { currency } : {}) })
         : mode === "mint"
           ? await api.post(`/api/${stage}/mint`, { account_id: to, amount, ...valid })
-          : await api.post(`/api/${stage}/transfer`, { from, to, amount, ...valid, ...(stage === "s4" && feeBps !== "0" ? { fee_bps: Number(feeBps) } : {}) });
+          : await api.post(`/api/${stage}/transfer`, { from, to, amount, ...valid });
     setBusy(false);
     if (res.ok) {
       setMessage({ tone: "good", text: `${res.status} committed${res.replayed ? " (replayed)" : ""}` });
@@ -191,8 +191,13 @@ function Operations({ stage, accounts, onDone }: { stage: Stage; accounts: Balan
               <Input value={amount} onChange={(e) => setAmount(e.target.value.trim())} inputMode="numeric" />
             </Field>
             {stage === "s4" && mode === "transfer" && (
-              <Field label="Fee (bps → 9999-FEE)" hint={`${(Number(feeBps) / 100).toFixed(2)}%`}>
-                <Input value={feeBps} onChange={(e) => setFeeBps(e.target.value.trim())} inputMode="numeric" />
+              <Field label="Fee → 9999-FEE (server policy)" hint="rounded up; set by the operator, not the client">
+                <div className="num flex h-8 items-center rounded-md border border-zinc-800 bg-zinc-900/60 px-2.5 text-[13px] text-zinc-300">
+                  {fees ? `${fees.transfer_bps} bps · ${(fees.transfer_bps / 100).toFixed(2)}%` : "—"}
+                  {fees && /^[1-9][0-9]*$/.test(amount) && (
+                    <span className="ml-auto text-zinc-500">fee {formatCents(((BigInt(amount) * BigInt(fees.transfer_bps) + 9999n) / 10000n).toString(), "")}</span>
+                  )}
+                </div>
               </Field>
             )}
             {bitemporal(stage) && (
@@ -373,13 +378,21 @@ function TimeTravelCard({ stage, asOfSystem, onChange }: { stage: Stage; asOfSys
 
 // ---------------------------------------------------------------- FX
 
+interface FxQuote {
+  rate_bps: string;
+  rate_set_at: number;
+  fee_bps: string;
+  fee: string;
+  net: string;
+  converted: string;
+}
+
 function FxCard({ accounts, onDone }: { accounts: Balance[]; onDone: () => void }) {
   const [from, setFrom] = useState("");
   const [to, setTo] = useState("");
   const [amount, setAmount] = useState("10000");
-  const [rate, setRate] = useState("9200");
-  const [fee, setFee] = useState("100");
-  const [quote, setQuote] = useState<{ fee: string; net: string; converted: string } | null>(null);
+  const [quote, setQuote] = useState<FxQuote | null>(null);
+  const [quoteError, setQuoteError] = useState<string | null>(null);
   const [message, setMessage] = useState<{ tone: "good" | "critical"; text: string } | null>(null);
   const fromAcct = accounts.find((a) => a.account_id === from);
   const toAcct = accounts.find((a) => a.account_id === to);
@@ -390,24 +403,28 @@ function FxCard({ accounts, onDone }: { accounts: Balance[]; onDone: () => void 
   }, [accounts, from, to]);
 
   useEffect(() => {
+    if (!fromAcct || !toAcct) return;
     const t = setTimeout(async () => {
-      const res = await api.get<{ fee: string; net: string; converted: string }>(`/api/s4/fx/quote?amount=${amount}&rate_bps=${rate}&fee_bps=${fee}`);
+      const res = await api.get<FxQuote>(`/api/s4/fx/quote?from_currency=${fromAcct.currency}&to_currency=${toAcct.currency}&amount=${encodeURIComponent(amount)}`);
       setQuote(res.ok ? res.data : null);
+      setQuoteError(res.ok ? null : `${res.error.code}: ${res.error.message}`);
     }, 150);
     return () => clearTimeout(t);
-  }, [amount, rate, fee]);
+  }, [amount, fromAcct?.currency, toAcct?.currency]); // eslint-disable-line react-hooks/exhaustive-deps
 
   async function submit() {
+    if (!quote) return;
     setMessage(null);
-    const res = await api.post("/api/s4/fx", { from, to, amount, rate_bps: Number(rate), fee_bps: Number(fee) });
+    // The quoted rate and fee travel as guards: the server rejects the request if its policy changed meanwhile.
+    const res = await api.post("/api/s4/fx", { from, to, amount, rate_bps: Number(quote.rate_bps), fee_bps: Number(quote.fee_bps) });
     if (res.ok) {
       setMessage({ tone: "good", text: "FX committed" });
       onDone();
-    } else setMessage({ tone: "critical", text: `${res.error.code} — ${res.error.message}` });
+    } else setMessage({ tone: "critical", text: `${res.error.code}: ${res.error.message}` });
   }
 
   return (
-    <Card title="FX conversion — integer basis points (10000 bps = 1.0000)">
+    <Card title="FX conversion at server rates (integer bps, 10000 bps = 1.0000)">
       <div className="grid grid-cols-2 gap-3">
         <Field label="From">
           <Select value={from} onChange={(e) => setFrom(e.target.value)}>
@@ -422,27 +439,26 @@ function FxCard({ accounts, onDone }: { accounts: Balance[]; onDone: () => void 
         <Field label="Amount (cents)">
           <Input value={amount} onChange={(e) => setAmount(e.target.value.trim())} />
         </Field>
-        <Field label="Rate (bps)" hint={`1 ${fromAcct?.currency ?? "?"} = ${(Number(rate) / 10000).toFixed(4)} ${toAcct?.currency ?? "?"}`}>
-          <Input value={rate} onChange={(e) => setRate(e.target.value.trim())} />
+        <Field label="Rate (operator-set)" hint={quote ? `set ${new Date(quote.rate_set_at).toLocaleString()}` : undefined}>
+          <div className="num flex h-8 items-center rounded-md border border-zinc-800 bg-zinc-900/60 px-2.5 text-[13px] text-zinc-300">
+            {quote ? `1 ${fromAcct?.currency} = ${(Number(quote.rate_bps) / 10000).toFixed(4)} ${toAcct?.currency} · ${quote.rate_bps} bps` : "—"}
+          </div>
         </Field>
-        <Field label="Fee (bps)">
-          <Input value={fee} onChange={(e) => setFee(e.target.value.trim())} />
-        </Field>
-        <div className="rounded-md border border-zinc-800 bg-zinc-950/60 p-2.5 text-[12px]">
-          <div className="text-[11px] uppercase tracking-wide text-zinc-500">Quote (before submit)</div>
+        <div className="col-span-2 rounded-md border border-zinc-800 bg-zinc-950/60 p-2.5 text-[12px]">
+          <div className="text-[11px] uppercase tracking-wide text-zinc-500">Quote before submitting</div>
           {quote ? (
-            <div className="num mt-1 space-y-0.5 text-zinc-300">
-              <div>fee → 9999-FEE: {formatCents(quote.fee, fromAcct?.currency)}</div>
-              <div>net → FX-POOL: {formatCents(quote.net, fromAcct?.currency)}</div>
-              <div className="text-zinc-100">payee gets: {formatCents(quote.converted, toAcct?.currency)}</div>
+            <div className="num mt-1 grid grid-cols-3 gap-2 text-zinc-300">
+              <div>fee ({quote.fee_bps} bps) → 9999-FEE<div className="text-zinc-100">{formatCents(quote.fee, fromAcct?.currency)}</div></div>
+              <div>net → FX-POOL<div className="text-zinc-100">{formatCents(quote.net, fromAcct?.currency)}</div></div>
+              <div>payee receives<div className="text-zinc-100">{formatCents(quote.converted, toAcct?.currency)}</div></div>
             </div>
           ) : (
-            <div className="mt-1 text-zinc-500">invalid inputs</div>
+            <div className="mt-1 text-zinc-500">{quoteError ?? "choose two accounts in different currencies"}</div>
           )}
         </div>
       </div>
       <div className="mt-4 flex items-center gap-3">
-        <Button variant="primary" onClick={submit} disabled={!quote || !from || !to}>Convert</Button>
+        <Button variant="primary" onClick={submit} disabled={!quote || quote.converted === "0"}>Convert</Button>
         {message && <Status tone={message.tone}>{message.text}</Status>}
       </div>
     </Card>

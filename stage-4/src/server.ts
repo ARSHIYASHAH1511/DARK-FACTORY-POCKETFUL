@@ -2,12 +2,13 @@ import { mkdirSync } from "node:fs";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { dirname, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
-import { SqliteLedger, quoteFx, toJson, type AsOf, type Route } from "./ledger.ts";
-import { HTTP_STATUS, LedgerError, parseAmount } from "./money.ts";
+import { SqliteLedger, toJson, type AsOf, type Route } from "./ledger.ts";
+import { HTTP_STATUS, LedgerError } from "./money.ts";
+import { feePolicyFromEnv, isOperator } from "./operator.ts";
 
 const dbPath = resolve(process.env.LEDGER_DB ?? "data/stage-4.db");
 mkdirSync(dirname(dbPath), { recursive: true });
-export const ledger = new SqliteLedger(dbPath);
+export const ledger = new SqliteLedger(dbPath, { fees: feePolicyFromEnv() });
 
 const MAX_BODY_BYTES = 64 * 1024;
 
@@ -47,7 +48,6 @@ const MUTATIONS: Record<string, Route> = {
   "POST /mint": "mint",
   "POST /transfer": "transfer",
   "POST /fx": "fx",
-  "POST /fund-pool": "fund_pool",
   "POST /holds": "hold",
 };
 
@@ -65,6 +65,16 @@ export const server = createServer(async (req, res) => {
 
     const mutation = MUTATIONS[route];
     if (mutation) return await mutate(req, res, mutation, await readJson(req));
+
+    if (path.startsWith("/admin/")) {
+      if (!isOperator(req.headers["x-operator-token"])) {
+        return send(res, 403, { ok: false, error: { code: "FORBIDDEN", message: "operator token required (set OPERATOR_TOKEN on the server)" } });
+      }
+      const body = await readJson(req);
+      if (route === "POST /admin/fx-rates") return send(res, 201, { ok: true, data: await ledger.setFxRate(body.base, body.quote, body.rate_bps) });
+      if (route === "POST /admin/fund-pool") return await mutate(req, res, "fund_pool", body);
+      return send(res, 404, { ok: false, error: { code: "NOT_FOUND", message: route } });
+    }
 
     const reverse = req.method === "POST" && path.match(/^\/reverse\/([^/]+)$/);
     if (reverse) {
@@ -92,17 +102,12 @@ export const server = createServer(async (req, res) => {
         return send(res, 200, { ok: true, data: ledger.holds() });
       case "GET /fx/quote": {
         const q = url.searchParams;
-        const int = (name: string, fallback?: string) => {
-          const raw = q.get(name) ?? fallback;
-          if (raw === undefined || !/^(0|[1-9][0-9]{0,9})$/.test(raw)) throw new LedgerError("VALIDATION", `${name} must be a non-negative integer`);
-          return BigInt(raw);
-        };
-        const amount = parseAmount(q.get("amount") ?? "");
-        const rate = int("rate_bps");
-        const fee = int("fee_bps", "0");
-        if (rate < 1n || fee > 9_999n) throw new LedgerError("VALIDATION", "rate_bps >= 1 and fee_bps <= 9999 required");
-        return send(res, 200, { ok: true, data: { amount, rate_bps: rate, fee_bps: fee, ...quoteFx(amount, rate, fee) } });
+        return send(res, 200, { ok: true, data: ledger.quote(q.get("from_currency"), q.get("to_currency"), q.get("amount") ?? "") });
       }
+      case "GET /fx/rates":
+        return send(res, 200, { ok: true, data: ledger.fxRates() });
+      case "GET /fees":
+        return send(res, 200, { ok: true, data: ledger.feePolicy });
       case "GET /timeline":
         return send(res, 200, { ok: true, data: ledger.timeline() });
       case "GET /proof":

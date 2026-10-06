@@ -3,7 +3,7 @@
 Stage 3 is stage 2 (WAL, `BEGIN IMMEDIATE`, SHA-256 idempotency, append-only triggers, bigint folds) plus two time axes per transaction. It has zero npm dependencies and needs Node 24 or later.
 
 ```sh
-node src/test.ts      # 50 tests: all stage-2 invariants + bitemporal + reversal
+node src/test.ts      # 53 tests: all stage-2 invariants + bitemporal + reversal
 node src/server.ts    # HTTP on :3004, DB at $LEDGER_DB (default data/stage-3.db)
 ```
 
@@ -13,7 +13,7 @@ node src/server.ts    # HTTP on :3004, DB at $LEDGER_DB (default data/stage-3.db
 | `valid_at` | When the event is effective in business terms. | Client-supplied (`valid_at`, epoch ms, 1 … 9999-12-31). Defaults to `system_at`. |
 | `system_at` | When the ledger learned about it. | Server-assigned under the write lock: `max(now, last + 1)`, so strictly increasing (and `UNIQUE`). |
 
-`GET /balances?as_of_valid=&as_of_system=` folds only transactions where `valid_at <= as_of_valid` and `system_at <= as_of_system`. Because entries are append-only, every as-of-system query is reproducible forever.
+`GET /balances?as_of_valid=&as_of_system=` folds only transactions where `valid_at <= as_of_valid` and `system_at <= as_of_system`. Because entries are append-only, every as-of-system query is reproducible forever. A system-time cut also hides accounts created after it. An `as_of_system` later than the ledger's latest commit is rejected (400), because the ledger can't answer for time it hasn't recorded. A future `as_of_valid` is allowed, since future-dated entries exist.
 
 ## No overdraft in valid time (I5)
 A debit at `valid_at = v` must leave the account non-negative at every valid-time point `>= v`. That means three things:

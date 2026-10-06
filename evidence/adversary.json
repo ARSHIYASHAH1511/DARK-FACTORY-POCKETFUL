@@ -1,0 +1,28 @@
+{
+  "seat": "adversary",
+  "certified_stages": [2, 3, 4],
+  "not_attacked_live": [1],
+  "at": "2026-10-06",
+  "suites": { "stage-1": "29/0", "stage-2": "30/0", "stage-3": "53/0", "stage-4": "82/0" },
+  "stage_2": {
+    "http_races": { "300_way": "50 ok / 250 INSUFFICIENT_FUNDS", "1000_way": "100 ok / 900 INSUFFICIENT_FUNDS" },
+    "idempotency": "100 same-key requests (50 tampered): 1 executed, 49 replayed, 50 x 409",
+    "overflow": "fixed after finding; max mints end in 400 OVERFLOW, /balances stays readable",
+    "busy_exhausted": 0,
+    "double_spends": 0
+  },
+  "stage_3": {
+    "backdating": "spend-before-funding, early spend of future credit, and path-breaking backdated debit all rejected",
+    "reversals": "60 concurrent reversals: 1 winner, +2 entries, 0 rows changed or deleted",
+    "backdated_race": "100-way at random valid_at: exactly 50 ok, valid-time path never negative",
+    "snapshots": "as_of_system stable after new accounts; future as_of_system rejected (fixed after finding)"
+  },
+  "stage_4": {
+    "fx_rate": "server-side, operator-only; client rate or fee mismatch -> 409 POLICY_MISMATCH with 0 rows (fixed after finding)",
+    "fee": "server policy, ceil rounding; 10 x 2-cent transfers collect 10 in fees",
+    "pool_race": "100-way FX against small EUR pool: 8 ok, 92 INSUFFICIENT_FUNDS, pool never negative",
+    "escrow": "100 concurrent holds vs 5000: exactly 50; 20 capture-vs-release races: 20 single winners, 0 doubles, 0 5xx; held funds unspendable",
+    "i2_detector": "planted 'Balance' column -> /proof schema_has_balance true"
+  },
+  "proof_at_end": { "per_currency": { "USD": "0", "EUR": "0" }, "unbalanced_txns": 0, "escrow_matches_open_holds": true }
+}

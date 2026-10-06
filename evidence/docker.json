@@ -1,0 +1,14 @@
+{
+  "seat": "verifier",
+  "at": "2026-10-06",
+  "docker": "29.7.2",
+  "base_image": "node:24-alpine",
+  "note": "Each image was built with network access (base image pull only) and then run with --network none. Inside the container the only interface is lo, and a fetch to an external host fails with EAI_AGAIN.",
+  "stages": [
+    { "stage": "stage-1", "build": "pass", "run_network_none": "pass", "result": "29 passed, 0 failed" },
+    { "stage": "stage-2", "build": "pass", "run_network_none": "pass", "result": "30 passed, 0 failed; stress PASS" },
+    { "stage": "stage-3", "build": "pass", "run_network_none": "pass", "result": "53 passed, 0 failed" },
+    { "stage": "stage-4", "build": "pass", "run_network_none": "pass", "result": "82 passed, 0 failed" }
+  ],
+  "egress_probe": { "interfaces": ["lo"], "fetch_external": "blocked (EAI_AGAIN)" }
+}
